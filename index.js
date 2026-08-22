@@ -87,6 +87,7 @@ function getGuildConfig(guildId) {
       invites: {},
       warns: {},
       warnRoles: { '1': null, '2': null, '3': null },
+      warnLogChannelId: null,
       tempBans: {},
     };
     sauvegarderConfig(config);
@@ -94,6 +95,7 @@ function getGuildConfig(guildId) {
   if (!config[guildId].invites) config[guildId].invites = {};
   if (!config[guildId].warns) config[guildId].warns = {};
   if (!config[guildId].warnRoles) config[guildId].warnRoles = { '1': null, '2': null, '3': null };
+  if (config[guildId].warnLogChannelId === undefined) config[guildId].warnLogChannelId = null;
   if (!config[guildId].tempBans) config[guildId].tempBans = {};
   return config[guildId];
 }
@@ -710,6 +712,13 @@ async function gererSelectMenu(interaction) {
     await interaction.update(construireHubWarn(interaction.guild, gc, cibleId));
     return;
   }
+  if (id === 'warn_hub_logchannel') {
+    gc.warnLogChannelId = interaction.values[0];
+    sauvegarderConfig(config);
+    const cibleId = cibleActuelleWarn(interaction);
+    await interaction.update(construireHubWarn(interaction.guild, gc, cibleId));
+    return;
+  }
 
   if (id === 'cfg_menu') {
     await interaction.update(construireSection(interaction.values[0], gc));
@@ -1044,11 +1053,13 @@ function construireHubWarn(guild, gc, cibleId) {
     .setColor(0x5865f2)
     .setDescription(
       `**Outils de modération**\nCherche ou sélectionne un membre, puis choisis une action.\n\n` +
+      `**Salon de logs :** ${gc.warnLogChannelId ? `<#${gc.warnLogChannelId}>` : 'non défini'}\n` +
       `**Cible :** ${cibleId ? `<@${cibleId}>` : 'aucune'}` +
       (cibleId ? `\n**Avertissements :** ${infos?.count || 0}/${SEUIL_WARN_KICK}` : '')
     );
 
   const selectMembre = new UserSelectMenuBuilder().setCustomId('warn_hub_select').setPlaceholder('Rechercher un membre...');
+  const selectSalon = new ChannelSelectMenuBuilder().setCustomId('warn_hub_logchannel').setPlaceholder('Choisir le salon de logs des avertissements').addChannelTypes(ChannelType.GuildText);
 
   const boutonsAction = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('warnpanel_add').setLabel('Ajouter').setStyle(ButtonStyle.Primary).setDisabled(!cibleId),
@@ -1063,7 +1074,7 @@ function construireHubWarn(guild, gc, cibleId) {
     new ButtonBuilder().setCustomId('warnpanel_refresh').setLabel('Actualiser').setEmoji('🔄').setStyle(ButtonStyle.Secondary)
   );
 
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(selectMembre), boutonsAction, boutonsNav] };
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(selectMembre), new ActionRowBuilder().addComponents(selectSalon), boutonsAction, boutonsNav] };
 }
 
 // Synchronise le rôle d'avertissement du membre avec son nombre actuel (1/2/3)
@@ -1092,6 +1103,16 @@ function cibleActuelleWarn(interaction) {
   return etatPanneauWarn.get(`${interaction.guild.id}:${interaction.user.id}`) || null;
 }
 
+function ordinalFr(n) {
+  return n === 1 ? '1er' : `${n}e`;
+}
+
+function envoyerLogWarn(guild, gc, texte) {
+  if (!gc.warnLogChannelId) return;
+  const salon = guild.channels.cache.get(gc.warnLogChannelId);
+  if (salon) salon.send(texte).catch(() => {});
+}
+
 async function gererAjoutWarn(interaction, gc) {
   const cibleId = cibleActuelleWarn(interaction);
   if (!cibleId) {
@@ -1115,6 +1136,7 @@ async function gererAjoutWarn(interaction, gc) {
   sauvegarderConfig(config);
 
   membreCible.send(`⚠️ Tu as reçu un avertissement sur **${interaction.guild.name}** (${nombre}/${SEUIL_WARN_KICK}).`).catch(() => {});
+  envoyerLogWarn(interaction.guild, gc, `⚠️ ${membreCible} a pris son ${ordinalFr(nombre)} avertissement. (${nombre}/${SEUIL_WARN_KICK})`);
 
   if (nombre >= SEUIL_WARN_KICK) {
     gc.warns[cibleId].count = 0;
@@ -1125,6 +1147,7 @@ async function gererAjoutWarn(interaction, gc) {
     if (membreCible.kickable) {
       await membreCible.kick(`Exclusion automatique : ${SEUIL_WARN_KICK} avertissements atteints`).catch(() => {});
       membreCible.send(`🚨 Tu as atteint ${SEUIL_WARN_KICK} avertissements sur **${interaction.guild.name}** et as été exclu du serveur.`).catch(() => {});
+      envoyerLogWarn(interaction.guild, gc, `🚨 ${membreCible} a été **exclu automatiquement** après ${SEUIL_WARN_KICK} avertissements.`);
       etatPanneauWarn.delete(`${interaction.guild.id}:${interaction.user.id}`);
       await interaction.update({ content: `🚨 ${membreCible} a atteint ${SEUIL_WARN_KICK} avertissements et a été **exclu automatiquement**. Compteur remis à 0.`, embeds: [], components: [] });
     } else {
