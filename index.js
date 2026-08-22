@@ -86,12 +86,14 @@ function getGuildConfig(guildId) {
       tickets: { enabled: false, categoryId: null, staffRoleId: null, logChannelId: null, panelChannelId: null, counter: 0, openTickets: {} },
       invites: {},
       warns: {},
+      warnRoles: { '1': null, '2': null, '3': null },
       tempBans: {},
     };
     sauvegarderConfig(config);
   }
   if (!config[guildId].invites) config[guildId].invites = {};
   if (!config[guildId].warns) config[guildId].warns = {};
+  if (!config[guildId].warnRoles) config[guildId].warnRoles = { '1': null, '2': null, '3': null };
   if (!config[guildId].tempBans) config[guildId].tempBans = {};
   return config[guildId];
 }
@@ -244,6 +246,7 @@ const OPTIONS_MENU_PRINCIPAL = [
   { label: 'Anti-lien', value: 'antilien', emoji: '🔗', description: 'Suppression automatique des liens' },
   { label: 'Anti-raid', value: 'antiraid', emoji: '🛡️', description: "Protection contre les vagues d'arrivées" },
   { label: 'Tickets', value: 'tickets', emoji: '🎫', description: 'Catégorie, rôle staff et logs' },
+  { label: "Rôles d'avertissement", value: 'warnroles', emoji: '🏷️', description: 'Rôle attribué à 1, 2 et 3 avertissements' },
 ];
 
 function menuPrincipal() {
@@ -382,6 +385,25 @@ function sectionTickets(gc) {
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(selectCategorie), new ActionRowBuilder().addComponents(selectRole), new ActionRowBuilder().addComponents(selectLogs), boutons] };
 }
 
+function sectionWarnRoles(gc) {
+  const embed = new EmbedBuilder()
+    .setTitle("🏷️ Rôles d'avertissement")
+    .setColor(0xfee75c)
+    .setDescription(
+      `Un rôle peut être attribué automatiquement selon le nombre d'avertissements du membre (retiré si le nombre change).\n\n` +
+      `**1 avertissement :** ${gc.warnRoles['1'] ? `<@&${gc.warnRoles['1']}>` : 'aucun'}\n` +
+      `**2 avertissements :** ${gc.warnRoles['2'] ? `<@&${gc.warnRoles['2']}>` : 'aucun'}\n` +
+      `**3 avertissements :** ${gc.warnRoles['3'] ? `<@&${gc.warnRoles['3']}>` : 'aucun'}`
+    );
+
+  const select1 = new RoleSelectMenuBuilder().setCustomId('cfg_warnrole_1').setPlaceholder('Rôle à 1 avertissement');
+  const select2 = new RoleSelectMenuBuilder().setCustomId('cfg_warnrole_2').setPlaceholder('Rôle à 2 avertissements');
+  const select3 = new RoleSelectMenuBuilder().setCustomId('cfg_warnrole_3').setPlaceholder('Rôle à 3 avertissements');
+  const boutons = new ActionRowBuilder().addComponents(boutonRetour());
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(select1), new ActionRowBuilder().addComponents(select2), new ActionRowBuilder().addComponents(select3), boutons] };
+}
+
 function construireSection(section, gc) {
   switch (section) {
     case 'bienvenue': return sectionBienvenue(gc);
@@ -390,6 +412,7 @@ function construireSection(section, gc) {
     case 'antilien': return sectionAntilien(gc);
     case 'antiraid': return sectionAntiraid(gc);
     case 'tickets': return sectionTickets(gc);
+    case 'warnroles': return sectionWarnRoles(gc);
     default: return menuPrincipal();
   }
 }
@@ -644,8 +667,8 @@ async function gererCommande(interaction) {
       break;
     }
     case 'warn': {
-      const select = new UserSelectMenuBuilder().setCustomId('warn_select_user').setPlaceholder('Choisir le membre à avertir');
-      await interaction.reply({ content: '⚠️ Sélectionne le membre à avertir :', components: [new ActionRowBuilder().addComponents(select)], ephemeral: true });
+      etatPanneauWarn.delete(`${interaction.guild.id}:${interaction.user.id}`);
+      await interaction.reply({ ...construireHubWarn(interaction.guild, gc, null), ephemeral: true });
       break;
     }
     case 'avertissements': {
@@ -656,8 +679,11 @@ async function gererCommande(interaction) {
     }
     case 'warn-reset': {
       const cible = interaction.options.getUser('membre');
-      gc.warns[cible.id] = { count: 0 };
+      if (!gc.warns[cible.id]) gc.warns[cible.id] = { count: 0, history: [] };
+      gc.warns[cible.id].count = 0;
       sauvegarderConfig(config);
+      const membreCible = await interaction.guild.members.fetch(cible.id).catch(() => null);
+      if (membreCible) await appliquerRolesAvertissement(membreCible, gc);
       await interaction.reply({ content: `✅ Avertissements de ${cible} remis à 0.`, ephemeral: true });
       break;
     }
@@ -678,8 +704,10 @@ async function gererSelectMenu(interaction) {
   const gc = getGuildConfig(interaction.guild.id);
   const id = interaction.customId;
 
-  if (id === 'warn_select_user') {
-    await avertirMembre(interaction, gc, interaction.values[0]);
+  if (id === 'warn_hub_select') {
+    const cibleId = interaction.values[0];
+    etatPanneauWarn.set(`${interaction.guild.id}:${interaction.user.id}`, cibleId);
+    await interaction.update(construireHubWarn(interaction.guild, gc, cibleId));
     return;
   }
 
@@ -741,6 +769,13 @@ async function gererSelectMenu(interaction) {
     await interaction.update(sectionTickets(gc));
     return;
   }
+  if (id === 'cfg_warnrole_1' || id === 'cfg_warnrole_2' || id === 'cfg_warnrole_3') {
+    const niveau = id.slice(-1);
+    gc.warnRoles[niveau] = interaction.values[0];
+    sauvegarderConfig(config);
+    await interaction.update(sectionWarnRoles(gc));
+    return;
+  }
 }
 
 async function gererModale(interaction) {
@@ -773,6 +808,38 @@ async function gererModale(interaction) {
 
 async function gererBouton(interaction) {
   const gc = getGuildConfig(interaction.guild.id);
+
+  // ---- Boutons du hub /warn ----
+  if (interaction.customId === 'warnpanel_back') {
+    etatPanneauWarn.delete(`${interaction.guild.id}:${interaction.user.id}`);
+    await interaction.update(construireHubWarn(interaction.guild, gc, null));
+    return;
+  }
+  if (interaction.customId === 'warnpanel_refresh') {
+    const cibleId = etatPanneauWarn.get(`${interaction.guild.id}:${interaction.user.id}`) || null;
+    await interaction.update(construireHubWarn(interaction.guild, gc, cibleId));
+    return;
+  }
+  if (interaction.customId === 'warnpanel_add') {
+    await gererAjoutWarn(interaction, gc);
+    return;
+  }
+  if (interaction.customId === 'warnpanel_remove') {
+    await gererRetraitWarn(interaction, gc);
+    return;
+  }
+  if (interaction.customId === 'warnpanel_list') {
+    await gererListeWarn(interaction, gc);
+    return;
+  }
+  if (interaction.customId === 'warnpanel_logs') {
+    await gererLogsWarn(interaction, gc);
+    return;
+  }
+  if (interaction.customId === 'warnpanel_clear') {
+    await gererEffacerWarn(interaction, gc);
+    return;
+  }
 
   // ---- Boutons du panneau /config ----
   if (interaction.customId === 'cfg_back') {
@@ -967,41 +1034,165 @@ function programmerDeban(guild, userId, delaiMs) {
   minuteursDeban.set(cle, timeout);
 }
 
-async function avertirMembre(interaction, gc, cibleId) {
-  if (cibleId === interaction.user.id) {
-    await interaction.update({ content: "⚠️ Tu ne peux pas t'avertir toi-même.", components: [] });
+// État du hub /warn : quel membre est actuellement sélectionné, par membre du staff (en mémoire)
+const etatPanneauWarn = new Map(); // `${guildId}:${staffId}` -> cibleId
+
+function construireHubWarn(guild, gc, cibleId) {
+  const infos = cibleId ? gc.warns[cibleId] : null;
+  const embed = new EmbedBuilder()
+    .setTitle(`🛡️ Avertissements • ${guild.name}`)
+    .setColor(0x5865f2)
+    .setDescription(
+      `**Outils de modération**\nCherche ou sélectionne un membre, puis choisis une action.\n\n` +
+      `**Cible :** ${cibleId ? `<@${cibleId}>` : 'aucune'}` +
+      (cibleId ? `\n**Avertissements :** ${infos?.count || 0}/${SEUIL_WARN_KICK}` : '')
+    );
+
+  const selectMembre = new UserSelectMenuBuilder().setCustomId('warn_hub_select').setPlaceholder('Rechercher un membre...');
+
+  const boutonsAction = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('warnpanel_add').setLabel('Ajouter').setStyle(ButtonStyle.Primary).setDisabled(!cibleId),
+    new ButtonBuilder().setCustomId('warnpanel_remove').setLabel('Retirer').setStyle(ButtonStyle.Secondary).setDisabled(!cibleId),
+    new ButtonBuilder().setCustomId('warnpanel_list').setLabel('Lister').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('warnpanel_logs').setLabel('Logs').setStyle(ButtonStyle.Secondary).setDisabled(!cibleId),
+    new ButtonBuilder().setCustomId('warnpanel_clear').setLabel('Effacer').setStyle(ButtonStyle.Danger).setDisabled(!cibleId)
+  );
+
+  const boutonsNav = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('warnpanel_back').setLabel('Retour').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('warnpanel_refresh').setLabel('Actualiser').setEmoji('🔄').setStyle(ButtonStyle.Secondary)
+  );
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(selectMembre), boutonsAction, boutonsNav] };
+}
+
+// Synchronise le rôle d'avertissement du membre avec son nombre actuel (1/2/3)
+async function appliquerRolesAvertissement(membreCible, gc) {
+  const nombre = gc.warns[membreCible.id]?.count || 0;
+  for (const niveau of ['1', '2', '3']) {
+    const roleId = gc.warnRoles[niveau];
+    if (roleId && String(nombre) !== niveau && membreCible.roles.cache.has(roleId)) {
+      await membreCible.roles.remove(roleId).catch(() => {});
+    }
+  }
+  const roleActuel = gc.warnRoles[String(nombre)];
+  if (roleActuel && !membreCible.roles.cache.has(roleActuel)) {
+    await membreCible.roles.add(roleActuel).catch(() => {});
+  }
+}
+
+function ajouterHistoriqueWarn(gc, cibleId, action, moderateurTag) {
+  if (!gc.warns[cibleId]) gc.warns[cibleId] = { count: 0, history: [] };
+  if (!gc.warns[cibleId].history) gc.warns[cibleId].history = [];
+  gc.warns[cibleId].history.unshift({ action, moderateur: moderateurTag, date: Date.now() });
+  gc.warns[cibleId].history = gc.warns[cibleId].history.slice(0, 10);
+}
+
+function cibleActuelleWarn(interaction) {
+  return etatPanneauWarn.get(`${interaction.guild.id}:${interaction.user.id}`) || null;
+}
+
+async function gererAjoutWarn(interaction, gc) {
+  const cibleId = cibleActuelleWarn(interaction);
+  if (!cibleId) {
+    await interaction.reply({ content: '⚠️ Sélectionne un membre.', ephemeral: true });
     return;
   }
-
+  if (cibleId === interaction.user.id) {
+    await interaction.reply({ content: "⚠️ Tu ne peux pas t'avertir toi-même.", ephemeral: true });
+    return;
+  }
   const membreCible = await interaction.guild.members.fetch(cibleId).catch(() => null);
   if (!membreCible) {
-    await interaction.update({ content: "⚠️ Ce membre n'est plus sur le serveur.", components: [] });
+    await interaction.reply({ content: "⚠️ Ce membre n'est plus sur le serveur.", ephemeral: true });
     return;
   }
 
-  if (!gc.warns[cibleId]) gc.warns[cibleId] = { count: 0 };
+  if (!gc.warns[cibleId]) gc.warns[cibleId] = { count: 0, history: [] };
   gc.warns[cibleId].count += 1;
   const nombre = gc.warns[cibleId].count;
+  ajouterHistoriqueWarn(gc, cibleId, '+1 avertissement', interaction.user.tag);
   sauvegarderConfig(config);
 
-  // On informe le membre par MP, sans bloquer si ses MP sont fermés
   membreCible.send(`⚠️ Tu as reçu un avertissement sur **${interaction.guild.name}** (${nombre}/${SEUIL_WARN_KICK}).`).catch(() => {});
 
   if (nombre >= SEUIL_WARN_KICK) {
     gc.warns[cibleId].count = 0;
+    ajouterHistoriqueWarn(gc, cibleId, 'Exclusion automatique (seuil atteint)', 'Gestion');
     sauvegarderConfig(config);
+    await appliquerRolesAvertissement(membreCible, gc);
 
     if (membreCible.kickable) {
       await membreCible.kick(`Exclusion automatique : ${SEUIL_WARN_KICK} avertissements atteints`).catch(() => {});
       membreCible.send(`🚨 Tu as atteint ${SEUIL_WARN_KICK} avertissements sur **${interaction.guild.name}** et as été exclu du serveur.`).catch(() => {});
-      await interaction.update({ content: `🚨 ${membreCible} a atteint ${SEUIL_WARN_KICK} avertissements et a été **exclu automatiquement** du serveur. Le compteur repart à 0.`, components: [] });
+      etatPanneauWarn.delete(`${interaction.guild.id}:${interaction.user.id}`);
+      await interaction.update({ content: `🚨 ${membreCible} a atteint ${SEUIL_WARN_KICK} avertissements et a été **exclu automatiquement**. Compteur remis à 0.`, embeds: [], components: [] });
     } else {
-      await interaction.update({ content: `⚠️ ${membreCible} a atteint ${SEUIL_WARN_KICK} avertissements, mais je n'ai pas la permission de l'exclure (rôle trop élevé). Le compteur repart à 0.`, components: [] });
+      await interaction.update(construireHubWarn(interaction.guild, gc, cibleId));
+      await interaction.followUp({ content: `⚠️ ${membreCible} a atteint ${SEUIL_WARN_KICK} avertissements, mais je n'ai pas la permission de l'exclure (rôle trop élevé).`, ephemeral: true });
     }
     return;
   }
 
-  await interaction.update({ content: `✅ ${membreCible} a reçu un avertissement (${nombre}/${SEUIL_WARN_KICK}).`, components: [] });
+  await appliquerRolesAvertissement(membreCible, gc);
+  await interaction.update(construireHubWarn(interaction.guild, gc, cibleId));
+}
+
+async function gererRetraitWarn(interaction, gc) {
+  const cibleId = cibleActuelleWarn(interaction);
+  if (!cibleId) {
+    await interaction.reply({ content: '⚠️ Sélectionne un membre.', ephemeral: true });
+    return;
+  }
+  if (!gc.warns[cibleId]) gc.warns[cibleId] = { count: 0, history: [] };
+  gc.warns[cibleId].count = Math.max(0, gc.warns[cibleId].count - 1);
+  ajouterHistoriqueWarn(gc, cibleId, '-1 avertissement', interaction.user.tag);
+  sauvegarderConfig(config);
+
+  const membreCible = await interaction.guild.members.fetch(cibleId).catch(() => null);
+  if (membreCible) await appliquerRolesAvertissement(membreCible, gc);
+  await interaction.update(construireHubWarn(interaction.guild, gc, cibleId));
+}
+
+async function gererEffacerWarn(interaction, gc) {
+  const cibleId = cibleActuelleWarn(interaction);
+  if (!cibleId) {
+    await interaction.reply({ content: '⚠️ Sélectionne un membre.', ephemeral: true });
+    return;
+  }
+  if (!gc.warns[cibleId]) gc.warns[cibleId] = { count: 0, history: [] };
+  gc.warns[cibleId].count = 0;
+  ajouterHistoriqueWarn(gc, cibleId, 'Avertissements effacés', interaction.user.tag);
+  sauvegarderConfig(config);
+
+  const membreCible = await interaction.guild.members.fetch(cibleId).catch(() => null);
+  if (membreCible) await appliquerRolesAvertissement(membreCible, gc);
+  await interaction.update(construireHubWarn(interaction.guild, gc, cibleId));
+}
+
+async function gererListeWarn(interaction, gc) {
+  const entrees = Object.entries(gc.warns).filter(([, v]) => v.count > 0);
+  if (entrees.length === 0) {
+    await interaction.reply({ content: 'ℹ️ Aucun membre averti actuellement.', ephemeral: true });
+    return;
+  }
+  const texte = entrees.map(([userId, v]) => `<@${userId}> — ${v.count}/${SEUIL_WARN_KICK}`).join('\n');
+  await interaction.reply({ content: `📋 **Membres avertis :**\n${texte}`, ephemeral: true });
+}
+
+async function gererLogsWarn(interaction, gc) {
+  const cibleId = cibleActuelleWarn(interaction);
+  if (!cibleId) {
+    await interaction.reply({ content: '⚠️ Sélectionne un membre.', ephemeral: true });
+    return;
+  }
+  const historique = gc.warns[cibleId]?.history || [];
+  if (historique.length === 0) {
+    await interaction.reply({ content: `ℹ️ Aucun historique pour <@${cibleId}>.`, ephemeral: true });
+    return;
+  }
+  const texte = historique.map(h => `<t:${Math.floor(h.date / 1000)}:R> — ${h.action} (par ${h.moderateur})`).join('\n');
+  await interaction.reply({ content: `📜 **Historique de <@${cibleId}> :**\n${texte}`, ephemeral: true });
 }
 
 // ============================================================
