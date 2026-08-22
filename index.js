@@ -63,8 +63,18 @@ let config = chargerConfig();
 function getGuildConfig(guildId) {
   if (!config[guildId]) {
     config[guildId] = {
-      welcome: { channelId: null, message: 'Bienvenue {user} sur **{server}** ! Nous sommes maintenant {count} membres.' },
-      goodbye: { channelId: null, message: '{user} a quitté **{server}**. Nous sommes maintenant {count} membres.' },
+      welcome: {
+        channelId: null,
+        title: 'Bienvenue {user} !',
+        message: "Un nouveau membre rejoint **{server}** !\n\nNous sommes ravis de t'avoir parmi nous.",
+        bannerUrl: null,
+      },
+      goodbye: {
+        channelId: null,
+        title: 'Départ de {user}...',
+        message: '{user} a quitté **{server}**.\n\nNous sommes maintenant {count} membre(s).',
+        bannerUrl: null,
+      },
       autoRole: { roleId: null },
       antiLink: { enabled: false, logChannelId: null, whitelistRoleIds: [], whitelistChannelIds: [] },
       antiRaid: { enabled: false, joinThreshold: 5, joinIntervalMs: 10000, action: 'kick', logChannelId: null },
@@ -100,16 +110,30 @@ const joinsRecents = new Map(); // guildId -> [timestamps]
 const commands = [
   new SlashCommandBuilder()
     .setName('config-bienvenue')
-    .setDescription("Configurer le message de bienvenue")
+    .setDescription("Configurer le message de bienvenue (un texte par défaut est déjà en place)")
     .addChannelOption(o => o.setName('salon').setDescription('Salon des messages de bienvenue').addChannelTypes(ChannelType.GuildText).setRequired(true))
-    .addStringOption(o => o.setName('message').setDescription('Message (variables : {user} {server} {count})').setRequired(false))
+    .addStringOption(o => o.setName('titre').setDescription('Titre (variables : {user} {server} {count})').setRequired(false))
+    .addStringOption(o => o.setName('message').setDescription('Texte (variables : {user} {server} {count})').setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('config-bienvenue-banniere')
+    .setDescription("Définir l'image de fond du message de bienvenue")
+    .addAttachmentOption(o => o.setName('image').setDescription('Image à utiliser (laisser vide pour retirer la bannière)').setRequired(false))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
     .setName('config-aurevoir')
-    .setDescription("Configurer le message d'au revoir")
+    .setDescription("Configurer le message d'au revoir (un texte par défaut est déjà en place)")
     .addChannelOption(o => o.setName('salon').setDescription("Salon des messages d'au revoir").addChannelTypes(ChannelType.GuildText).setRequired(true))
-    .addStringOption(o => o.setName('message').setDescription('Message (variables : {user} {server} {count})').setRequired(false))
+    .addStringOption(o => o.setName('titre').setDescription('Titre (variables : {user} {server} {count})').setRequired(false))
+    .addStringOption(o => o.setName('message').setDescription('Texte (variables : {user} {server} {count})').setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('config-aurevoir-banniere')
+    .setDescription("Définir l'image de fond du message d'au revoir")
+    .addAttachmentOption(o => o.setName('image').setDescription('Image à utiliser (laisser vide pour retirer la bannière)').setRequired(false))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
@@ -172,6 +196,20 @@ function remplacerVariables(texte, membre) {
 
 const REGEX_LIEN = /(https?:\/\/|www\.)[^\s]+/gi;
 
+function construireEmbedAccueil(conf, membre, { estBienvenue }) {
+  const embed = new EmbedBuilder()
+    .setTitle(remplacerVariables(conf.title, membre))
+    .setDescription(remplacerVariables(conf.message, membre))
+    .setColor(estBienvenue ? 0x57f287 : 0xed4245)
+    .setThumbnail(membre.user.displayAvatarURL({ size: 256 }))
+    .setFooter({ text: `${membre.guild.name} • ${membre.guild.memberCount} membre(s)`, iconURL: membre.guild.iconURL() || undefined })
+    .setTimestamp();
+
+  if (conf.bannerUrl) embed.setImage(conf.bannerUrl);
+
+  return embed;
+}
+
 // ============================================================
 //  ÉVÉNEMENT : PRÊT
 // ============================================================
@@ -191,7 +229,10 @@ client.on(Events.GuildMemberAdd, async (membre) => {
   // Message de bienvenue
   if (gc.welcome.channelId) {
     const salon = membre.guild.channels.cache.get(gc.welcome.channelId);
-    if (salon) salon.send(remplacerVariables(gc.welcome.message, membre)).catch(() => {});
+    if (salon) {
+      const embed = construireEmbedAccueil(gc.welcome, membre, { estBienvenue: true });
+      salon.send({ content: `${membre}`, embeds: [embed] }).catch(() => {});
+    }
   }
 
   // Rôle automatique
@@ -231,7 +272,10 @@ client.on(Events.GuildMemberRemove, async (membre) => {
   const gc = getGuildConfig(membre.guild.id);
   if (gc.goodbye.channelId) {
     const salon = membre.guild.channels.cache.get(gc.goodbye.channelId);
-    if (salon) salon.send(remplacerVariables(gc.goodbye.message, membre)).catch(() => {});
+    if (salon) {
+      const embed = construireEmbedAccueil(gc.goodbye, membre, { estBienvenue: false });
+      salon.send({ embeds: [embed] }).catch(() => {});
+    }
   }
 });
 
@@ -290,18 +334,38 @@ async function gererCommande(interaction) {
   switch (interaction.commandName) {
     case 'config-bienvenue': {
       gc.welcome.channelId = interaction.options.getChannel('salon').id;
+      const titre = interaction.options.getString('titre');
       const msg = interaction.options.getString('message');
+      if (titre) gc.welcome.title = titre;
       if (msg) gc.welcome.message = msg;
       sauvegarderConfig(config);
-      await interaction.reply({ content: `✅ Message de bienvenue configuré dans <#${gc.welcome.channelId}>.`, ephemeral: true });
+      const apercu = construireEmbedAccueil(gc.welcome, interaction.member, { estBienvenue: true });
+      await interaction.reply({ content: `✅ Message de bienvenue configuré dans <#${gc.welcome.channelId}>. Aperçu :`, embeds: [apercu], ephemeral: true });
+      break;
+    }
+    case 'config-bienvenue-banniere': {
+      const image = interaction.options.getAttachment('image');
+      gc.welcome.bannerUrl = image ? image.url : null;
+      sauvegarderConfig(config);
+      await interaction.reply({ content: image ? '✅ Bannière de bienvenue mise à jour.' : '✅ Bannière de bienvenue retirée.', ephemeral: true });
       break;
     }
     case 'config-aurevoir': {
       gc.goodbye.channelId = interaction.options.getChannel('salon').id;
+      const titre = interaction.options.getString('titre');
       const msg = interaction.options.getString('message');
+      if (titre) gc.goodbye.title = titre;
       if (msg) gc.goodbye.message = msg;
       sauvegarderConfig(config);
-      await interaction.reply({ content: `✅ Message d'au revoir configuré dans <#${gc.goodbye.channelId}>.`, ephemeral: true });
+      const apercu = construireEmbedAccueil(gc.goodbye, interaction.member, { estBienvenue: false });
+      await interaction.reply({ content: `✅ Message d'au revoir configuré dans <#${gc.goodbye.channelId}>. Aperçu :`, embeds: [apercu], ephemeral: true });
+      break;
+    }
+    case 'config-aurevoir-banniere': {
+      const image = interaction.options.getAttachment('image');
+      gc.goodbye.bannerUrl = image ? image.url : null;
+      sauvegarderConfig(config);
+      await interaction.reply({ content: image ? "✅ Bannière d'au revoir mise à jour." : "✅ Bannière d'au revoir retirée.", ephemeral: true });
       break;
     }
     case 'config-autorole': {
