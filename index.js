@@ -30,6 +30,10 @@ const {
   ButtonStyle,
   RoleSelectMenuBuilder,
   ChannelSelectMenuBuilder,
+  StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -109,11 +113,8 @@ const joinsRecents = new Map(); // guildId -> [timestamps]
 
 const commands = [
   new SlashCommandBuilder()
-    .setName('config-bienvenue')
-    .setDescription("Configurer le message de bienvenue (un texte par défaut est déjà en place)")
-    .addChannelOption(o => o.setName('salon').setDescription('Salon des messages de bienvenue').addChannelTypes(ChannelType.GuildText).setRequired(true))
-    .addStringOption(o => o.setName('titre').setDescription('Titre (variables : {user} {server} {count})').setRequired(false))
-    .addStringOption(o => o.setName('message').setDescription('Texte (variables : {user} {server} {count})').setRequired(false))
+    .setName('config')
+    .setDescription('Ouvrir le panneau de configuration du bot (menus déroulants)')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
@@ -123,48 +124,9 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
-    .setName('config-aurevoir')
-    .setDescription("Configurer le message d'au revoir (un texte par défaut est déjà en place)")
-    .addChannelOption(o => o.setName('salon').setDescription("Salon des messages d'au revoir").addChannelTypes(ChannelType.GuildText).setRequired(true))
-    .addStringOption(o => o.setName('titre').setDescription('Titre (variables : {user} {server} {count})').setRequired(false))
-    .addStringOption(o => o.setName('message').setDescription('Texte (variables : {user} {server} {count})').setRequired(false))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-
-  new SlashCommandBuilder()
     .setName('config-aurevoir-banniere')
     .setDescription("Définir l'image de fond du message d'au revoir")
     .addAttachmentOption(o => o.setName('image').setDescription('Image à utiliser (laisser vide pour retirer la bannière)').setRequired(false))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-
-  new SlashCommandBuilder()
-    .setName('config-autorole')
-    .setDescription("Définir le rôle automatique donné aux nouveaux membres")
-    .addRoleOption(o => o.setName('role').setDescription('Rôle à attribuer (laisser vide pour désactiver)').setRequired(false))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-
-  new SlashCommandBuilder()
-    .setName('config-antilien')
-    .setDescription('Activer/configurer la protection anti-lien')
-    .addStringOption(o => o.setName('etat').setDescription('on ou off').setRequired(true).addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' }))
-    .addChannelOption(o => o.setName('salon-logs').setDescription('Salon de logs (optionnel)').addChannelTypes(ChannelType.GuildText).setRequired(false))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-
-  new SlashCommandBuilder()
-    .setName('config-antiraid')
-    .setDescription('Activer/configurer la protection anti-raid')
-    .addStringOption(o => o.setName('etat').setDescription('on ou off').setRequired(true).addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' }))
-    .addIntegerOption(o => o.setName('seuil').setDescription("Nombre d'arrivées suspectes (défaut 5)").setRequired(false))
-    .addIntegerOption(o => o.setName('intervalle-secondes').setDescription('Intervalle en secondes (défaut 10)').setRequired(false))
-    .addStringOption(o => o.setName('action').setDescription('Action sur les comptes suspects').addChoices({ name: 'kick', value: 'kick' }, { name: 'ban', value: 'ban' }, { name: 'alerte seulement', value: 'alert' }).setRequired(false))
-    .addChannelOption(o => o.setName('salon-logs').setDescription('Salon de logs (optionnel)').addChannelTypes(ChannelType.GuildText).setRequired(false))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-
-  new SlashCommandBuilder()
-    .setName('config-tickets')
-    .setDescription('Configurer le système de tickets')
-    .addChannelOption(o => o.setName('categorie').setDescription('Catégorie où créer les tickets').addChannelTypes(ChannelType.GuildCategory).setRequired(true))
-    .addRoleOption(o => o.setName('role-staff').setDescription("Rôle du staff qui voit les tickets").setRequired(true))
-    .addChannelOption(o => o.setName('salon-logs').setDescription('Salon de logs (optionnel)').addChannelTypes(ChannelType.GuildText).setRequired(false))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
@@ -208,6 +170,181 @@ function construireEmbedAccueil(conf, membre, { estBienvenue }) {
   if (conf.bannerUrl) embed.setImage(conf.bannerUrl);
 
   return embed;
+}
+
+// ============================================================
+//  PANNEAU /config (menus déroulants)
+// ============================================================
+
+const OPTIONS_MENU_PRINCIPAL = [
+  { label: 'Bienvenue', value: 'bienvenue', emoji: '🎉', description: 'Salon, titre et texte de bienvenue' },
+  { label: 'Au revoir', value: 'aurevoir', emoji: '👋', description: "Salon, titre et texte d'au revoir" },
+  { label: 'Rôle automatique', value: 'autorole', emoji: '🎭', description: 'Rôle donné aux nouveaux membres' },
+  { label: 'Anti-lien', value: 'antilien', emoji: '🔗', description: 'Suppression automatique des liens' },
+  { label: 'Anti-raid', value: 'antiraid', emoji: '🛡️', description: "Protection contre les vagues d'arrivées" },
+  { label: 'Tickets', value: 'tickets', emoji: '🎫', description: 'Catégorie, rôle staff et logs' },
+];
+
+function menuPrincipal() {
+  const embed = new EmbedBuilder()
+    .setTitle('⚙️ Panneau de configuration — Gestion')
+    .setDescription('Choisis une catégorie dans le menu ci-dessous pour la configurer.')
+    .setColor(0x2b6cb0);
+
+  const select = new StringSelectMenuBuilder()
+    .setCustomId('cfg_menu')
+    .setPlaceholder('Choisir une catégorie...')
+    .addOptions(OPTIONS_MENU_PRINCIPAL);
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] };
+}
+
+function boutonRetour() {
+  return new ButtonBuilder().setCustomId('cfg_back').setLabel('Retour').setEmoji('⬅️').setStyle(ButtonStyle.Secondary);
+}
+
+function sectionBienvenue(gc) {
+  const embed = new EmbedBuilder()
+    .setTitle('🎉 Bienvenue')
+    .setColor(0x57f287)
+    .setDescription(
+      `**Salon :** ${gc.welcome.channelId ? `<#${gc.welcome.channelId}>` : 'non défini'}\n` +
+      `**Titre :** ${gc.welcome.title}\n**Texte :** ${gc.welcome.message}\n` +
+      `**Bannière :** ${gc.welcome.bannerUrl ? 'définie ✅ (via /config-bienvenue-banniere)' : 'aucune (via /config-bienvenue-banniere)'}`
+    );
+
+  const selectSalon = new ChannelSelectMenuBuilder().setCustomId('cfg_welcome_channel').setPlaceholder('Choisir le salon de bienvenue').addChannelTypes(ChannelType.GuildText);
+  const boutons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('cfg_welcome_edit').setLabel('Modifier le texte').setEmoji('✏️').setStyle(ButtonStyle.Primary),
+    boutonRetour()
+  );
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(selectSalon), boutons] };
+}
+
+function sectionAurevoir(gc) {
+  const embed = new EmbedBuilder()
+    .setTitle('👋 Au revoir')
+    .setColor(0xed4245)
+    .setDescription(
+      `**Salon :** ${gc.goodbye.channelId ? `<#${gc.goodbye.channelId}>` : 'non défini'}\n` +
+      `**Titre :** ${gc.goodbye.title}\n**Texte :** ${gc.goodbye.message}\n` +
+      `**Bannière :** ${gc.goodbye.bannerUrl ? 'définie ✅ (via /config-aurevoir-banniere)' : 'aucune (via /config-aurevoir-banniere)'}`
+    );
+
+  const selectSalon = new ChannelSelectMenuBuilder().setCustomId('cfg_goodbye_channel').setPlaceholder("Choisir le salon d'au revoir").addChannelTypes(ChannelType.GuildText);
+  const boutons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('cfg_goodbye_edit').setLabel('Modifier le texte').setEmoji('✏️').setStyle(ButtonStyle.Primary),
+    boutonRetour()
+  );
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(selectSalon), boutons] };
+}
+
+function sectionAutorole(gc) {
+  const embed = new EmbedBuilder()
+    .setTitle('🎭 Rôle automatique')
+    .setColor(0xfee75c)
+    .setDescription(`**Rôle actuel :** ${gc.autoRole.roleId ? `<@&${gc.autoRole.roleId}>` : 'aucun'}`);
+
+  const selectRole = new RoleSelectMenuBuilder().setCustomId('cfg_autorole_role').setPlaceholder('Choisir le rôle automatique');
+  const boutons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('cfg_autorole_clear').setLabel('Désactiver').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
+    boutonRetour()
+  );
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(selectRole), boutons] };
+}
+
+function sectionAntilien(gc) {
+  const embed = new EmbedBuilder()
+    .setTitle('🔗 Anti-lien')
+    .setColor(0x5865f2)
+    .setDescription(
+      `**État :** ${gc.antiLink.enabled ? 'activé ✅' : 'désactivé ❌'}\n` +
+      `**Salon de logs :** ${gc.antiLink.logChannelId ? `<#${gc.antiLink.logChannelId}>` : 'aucun'}`
+    );
+
+  const selectLogs = new ChannelSelectMenuBuilder().setCustomId('cfg_antilien_logs').setPlaceholder('Choisir le salon de logs').addChannelTypes(ChannelType.GuildText);
+  const boutons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('cfg_antilien_toggle').setLabel(gc.antiLink.enabled ? 'Désactiver' : 'Activer').setEmoji(gc.antiLink.enabled ? '🔴' : '🟢').setStyle(gc.antiLink.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
+    boutonRetour()
+  );
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(selectLogs), boutons] };
+}
+
+function sectionAntiraid(gc) {
+  const embed = new EmbedBuilder()
+    .setTitle('🛡️ Anti-raid')
+    .setColor(0x5865f2)
+    .setDescription(
+      `**État :** ${gc.antiRaid.enabled ? 'activé ✅' : 'désactivé ❌'}\n` +
+      `**Seuil :** ${gc.antiRaid.joinThreshold} arrivées / ${gc.antiRaid.joinIntervalMs / 1000}s\n` +
+      `**Action :** ${gc.antiRaid.action}\n` +
+      `**Salon de logs :** ${gc.antiRaid.logChannelId ? `<#${gc.antiRaid.logChannelId}>` : 'aucun'}`
+    );
+
+  const selectAction = new StringSelectMenuBuilder().setCustomId('cfg_antiraid_action').setPlaceholder('Action sur les comptes suspects').addOptions(
+    { label: 'Kick', value: 'kick', emoji: '👢' },
+    { label: 'Ban', value: 'ban', emoji: '🔨' },
+    { label: 'Alerte seulement', value: 'alert', emoji: '⚠️' }
+  );
+  const selectLogs = new ChannelSelectMenuBuilder().setCustomId('cfg_antiraid_logs').setPlaceholder('Choisir le salon de logs').addChannelTypes(ChannelType.GuildText);
+  const boutons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('cfg_antiraid_toggle').setLabel(gc.antiRaid.enabled ? 'Désactiver' : 'Activer').setEmoji(gc.antiRaid.enabled ? '🔴' : '🟢').setStyle(gc.antiRaid.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('cfg_antiraid_edit').setLabel('Régler seuil / intervalle').setEmoji('✏️').setStyle(ButtonStyle.Primary),
+    boutonRetour()
+  );
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(selectAction), new ActionRowBuilder().addComponents(selectLogs), boutons] };
+}
+
+function sectionTickets(gc) {
+  const embed = new EmbedBuilder()
+    .setTitle('🎫 Tickets')
+    .setColor(0x2b6cb0)
+    .setDescription(
+      `**Catégorie :** ${gc.tickets.categoryId ? `<#${gc.tickets.categoryId}>` : 'non définie'}\n` +
+      `**Rôle staff :** ${gc.tickets.staffRoleId ? `<@&${gc.tickets.staffRoleId}>` : 'non défini'}\n` +
+      `**Salon de logs :** ${gc.tickets.logChannelId ? `<#${gc.tickets.logChannelId}>` : 'aucun'}\n\n` +
+      `Une fois configuré, utilise \`/ticket-panel\` dans le salon où tu veux afficher le bouton "Ouvrir un ticket".`
+    );
+
+  const selectCategorie = new ChannelSelectMenuBuilder().setCustomId('cfg_tickets_categorie').setPlaceholder('Choisir la catégorie des tickets').addChannelTypes(ChannelType.GuildCategory);
+  const selectRole = new RoleSelectMenuBuilder().setCustomId('cfg_tickets_role').setPlaceholder('Choisir le rôle staff');
+  const selectLogs = new ChannelSelectMenuBuilder().setCustomId('cfg_tickets_logs').setPlaceholder('Choisir le salon de logs').addChannelTypes(ChannelType.GuildText);
+  const boutons = new ActionRowBuilder().addComponents(boutonRetour());
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(selectCategorie), new ActionRowBuilder().addComponents(selectRole), new ActionRowBuilder().addComponents(selectLogs), boutons] };
+}
+
+function construireSection(section, gc) {
+  switch (section) {
+    case 'bienvenue': return sectionBienvenue(gc);
+    case 'aurevoir': return sectionAurevoir(gc);
+    case 'autorole': return sectionAutorole(gc);
+    case 'antilien': return sectionAntilien(gc);
+    case 'antiraid': return sectionAntiraid(gc);
+    case 'tickets': return sectionTickets(gc);
+    default: return menuPrincipal();
+  }
+}
+
+function modaleTexte(customId, titreModale, valeurTitre, valeurMessage) {
+  const modal = new ModalBuilder().setCustomId(customId).setTitle(titreModale);
+  const champTitre = new TextInputBuilder().setCustomId('titre').setLabel('Titre (variables : {user} {server} {count})').setStyle(TextInputStyle.Short).setValue(valeurTitre).setRequired(true).setMaxLength(256);
+  const champMessage = new TextInputBuilder().setCustomId('message').setLabel('Texte (variables : {user} {server} {count})').setStyle(TextInputStyle.Paragraph).setValue(valeurMessage).setRequired(true).setMaxLength(1000);
+  modal.addComponents(new ActionRowBuilder().addComponents(champTitre), new ActionRowBuilder().addComponents(champMessage));
+  return modal;
+}
+
+function modaleAntiraid(gc) {
+  const modal = new ModalBuilder().setCustomId('cfg_antiraid_modal').setTitle('Réglages anti-raid');
+  const champSeuil = new TextInputBuilder().setCustomId('seuil').setLabel("Nombre d'arrivées suspectes").setStyle(TextInputStyle.Short).setValue(String(gc.antiRaid.joinThreshold)).setRequired(true).setMaxLength(3);
+  const champIntervalle = new TextInputBuilder().setCustomId('intervalle').setLabel('Intervalle en secondes').setStyle(TextInputStyle.Short).setValue(String(gc.antiRaid.joinIntervalMs / 1000)).setRequired(true).setMaxLength(4);
+  modal.addComponents(new ActionRowBuilder().addComponents(champSeuil), new ActionRowBuilder().addComponents(champIntervalle));
+  return modal;
 }
 
 // ============================================================
@@ -318,6 +455,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await gererCommande(interaction);
     } else if (interaction.isButton()) {
       await gererBouton(interaction);
+    } else if (interaction.isStringSelectMenu()) {
+      await gererSelectMenu(interaction);
+    } else if (interaction.isChannelSelectMenu() || interaction.isRoleSelectMenu()) {
+      await gererSelectMenu(interaction);
+    } else if (interaction.isModalSubmit()) {
+      await gererModale(interaction);
     }
   } catch (err) {
     console.error(err);
@@ -332,15 +475,8 @@ async function gererCommande(interaction) {
   const gc = getGuildConfig(interaction.guild.id);
 
   switch (interaction.commandName) {
-    case 'config-bienvenue': {
-      gc.welcome.channelId = interaction.options.getChannel('salon').id;
-      const titre = interaction.options.getString('titre');
-      const msg = interaction.options.getString('message');
-      if (titre) gc.welcome.title = titre;
-      if (msg) gc.welcome.message = msg;
-      sauvegarderConfig(config);
-      const apercu = construireEmbedAccueil(gc.welcome, interaction.member, { estBienvenue: true });
-      await interaction.reply({ content: `✅ Message de bienvenue configuré dans <#${gc.welcome.channelId}>. Aperçu :`, embeds: [apercu], ephemeral: true });
+    case 'config': {
+      await interaction.reply({ ...menuPrincipal(), ephemeral: true });
       break;
     }
     case 'config-bienvenue-banniere': {
@@ -350,17 +486,6 @@ async function gererCommande(interaction) {
       await interaction.reply({ content: image ? '✅ Bannière de bienvenue mise à jour.' : '✅ Bannière de bienvenue retirée.', ephemeral: true });
       break;
     }
-    case 'config-aurevoir': {
-      gc.goodbye.channelId = interaction.options.getChannel('salon').id;
-      const titre = interaction.options.getString('titre');
-      const msg = interaction.options.getString('message');
-      if (titre) gc.goodbye.title = titre;
-      if (msg) gc.goodbye.message = msg;
-      sauvegarderConfig(config);
-      const apercu = construireEmbedAccueil(gc.goodbye, interaction.member, { estBienvenue: false });
-      await interaction.reply({ content: `✅ Message d'au revoir configuré dans <#${gc.goodbye.channelId}>. Aperçu :`, embeds: [apercu], ephemeral: true });
-      break;
-    }
     case 'config-aurevoir-banniere': {
       const image = interaction.options.getAttachment('image');
       gc.goodbye.bannerUrl = image ? image.url : null;
@@ -368,50 +493,12 @@ async function gererCommande(interaction) {
       await interaction.reply({ content: image ? "✅ Bannière d'au revoir mise à jour." : "✅ Bannière d'au revoir retirée.", ephemeral: true });
       break;
     }
-    case 'config-autorole': {
-      const role = interaction.options.getRole('role');
-      gc.autoRole.roleId = role ? role.id : null;
-      sauvegarderConfig(config);
-      await interaction.reply({ content: role ? `✅ Rôle automatique : ${role}.` : '✅ Rôle automatique désactivé.', ephemeral: true });
-      break;
-    }
-    case 'config-antilien': {
-      gc.antiLink.enabled = interaction.options.getString('etat') === 'on';
-      const logSalon = interaction.options.getChannel('salon-logs');
-      if (logSalon) gc.antiLink.logChannelId = logSalon.id;
-      sauvegarderConfig(config);
-      await interaction.reply({ content: `✅ Anti-lien ${gc.antiLink.enabled ? 'activé' : 'désactivé'}.`, ephemeral: true });
-      break;
-    }
-    case 'config-antiraid': {
-      gc.antiRaid.enabled = interaction.options.getString('etat') === 'on';
-      const seuil = interaction.options.getInteger('seuil');
-      const intervalle = interaction.options.getInteger('intervalle-secondes');
-      const action = interaction.options.getString('action');
-      const logSalon = interaction.options.getChannel('salon-logs');
-      if (seuil) gc.antiRaid.joinThreshold = seuil;
-      if (intervalle) gc.antiRaid.joinIntervalMs = intervalle * 1000;
-      if (action) gc.antiRaid.action = action;
-      if (logSalon) gc.antiRaid.logChannelId = logSalon.id;
-      sauvegarderConfig(config);
-      await interaction.reply({ content: `✅ Anti-raid ${gc.antiRaid.enabled ? 'activé' : 'désactivé'} (seuil : ${gc.antiRaid.joinThreshold} arrivées / ${gc.antiRaid.joinIntervalMs / 1000}s, action : ${gc.antiRaid.action}).`, ephemeral: true });
-      break;
-    }
-    case 'config-tickets': {
-      gc.tickets.enabled = true;
-      gc.tickets.categoryId = interaction.options.getChannel('categorie').id;
-      gc.tickets.staffRoleId = interaction.options.getRole('role-staff').id;
-      const logSalon = interaction.options.getChannel('salon-logs');
-      if (logSalon) gc.tickets.logChannelId = logSalon.id;
-      sauvegarderConfig(config);
-      await interaction.reply({ content: '✅ Système de tickets configuré. Utilise `/ticket-panel` dans le salon de ton choix pour afficher le bouton.', ephemeral: true });
-      break;
-    }
     case 'ticket-panel': {
-      if (!gc.tickets.enabled) {
-        await interaction.reply({ content: "⚠️ Configure d'abord les tickets avec `/config-tickets`.", ephemeral: true });
+      if (!gc.tickets.categoryId || !gc.tickets.staffRoleId) {
+        await interaction.reply({ content: "⚠️ Configure d'abord la catégorie et le rôle staff via `/config` → 🎫 Tickets.", ephemeral: true });
         return;
       }
+      gc.tickets.enabled = true;
       const embed = new EmbedBuilder()
         .setTitle('🎫 Support')
         .setDescription('Clique sur le bouton ci-dessous pour ouvrir un ticket avec le staff.')
@@ -432,8 +519,138 @@ async function gererCommande(interaction) {
   }
 }
 
+// ---- Menu principal + navigation entre sections ----
+
+async function gererSelectMenu(interaction) {
+  const gc = getGuildConfig(interaction.guild.id);
+  const id = interaction.customId;
+
+  if (id === 'cfg_menu') {
+    await interaction.update(construireSection(interaction.values[0], gc));
+    return;
+  }
+  if (id === 'cfg_welcome_channel') {
+    gc.welcome.channelId = interaction.values[0];
+    sauvegarderConfig(config);
+    await interaction.update(sectionBienvenue(gc));
+    return;
+  }
+  if (id === 'cfg_goodbye_channel') {
+    gc.goodbye.channelId = interaction.values[0];
+    sauvegarderConfig(config);
+    await interaction.update(sectionAurevoir(gc));
+    return;
+  }
+  if (id === 'cfg_autorole_role') {
+    gc.autoRole.roleId = interaction.values[0];
+    sauvegarderConfig(config);
+    await interaction.update(sectionAutorole(gc));
+    return;
+  }
+  if (id === 'cfg_antilien_logs') {
+    gc.antiLink.logChannelId = interaction.values[0];
+    sauvegarderConfig(config);
+    await interaction.update(sectionAntilien(gc));
+    return;
+  }
+  if (id === 'cfg_antiraid_action') {
+    gc.antiRaid.action = interaction.values[0];
+    sauvegarderConfig(config);
+    await interaction.update(sectionAntiraid(gc));
+    return;
+  }
+  if (id === 'cfg_antiraid_logs') {
+    gc.antiRaid.logChannelId = interaction.values[0];
+    sauvegarderConfig(config);
+    await interaction.update(sectionAntiraid(gc));
+    return;
+  }
+  if (id === 'cfg_tickets_categorie') {
+    gc.tickets.categoryId = interaction.values[0];
+    sauvegarderConfig(config);
+    await interaction.update(sectionTickets(gc));
+    return;
+  }
+  if (id === 'cfg_tickets_role') {
+    gc.tickets.staffRoleId = interaction.values[0];
+    sauvegarderConfig(config);
+    await interaction.update(sectionTickets(gc));
+    return;
+  }
+  if (id === 'cfg_tickets_logs') {
+    gc.tickets.logChannelId = interaction.values[0];
+    sauvegarderConfig(config);
+    await interaction.update(sectionTickets(gc));
+    return;
+  }
+}
+
+async function gererModale(interaction) {
+  const gc = getGuildConfig(interaction.guild.id);
+
+  if (interaction.customId === 'cfg_welcome_modal') {
+    gc.welcome.title = interaction.fields.getTextInputValue('titre');
+    gc.welcome.message = interaction.fields.getTextInputValue('message');
+    sauvegarderConfig(config);
+    await interaction.update(sectionBienvenue(gc));
+    return;
+  }
+  if (interaction.customId === 'cfg_goodbye_modal') {
+    gc.goodbye.title = interaction.fields.getTextInputValue('titre');
+    gc.goodbye.message = interaction.fields.getTextInputValue('message');
+    sauvegarderConfig(config);
+    await interaction.update(sectionAurevoir(gc));
+    return;
+  }
+  if (interaction.customId === 'cfg_antiraid_modal') {
+    const seuil = parseInt(interaction.fields.getTextInputValue('seuil'), 10);
+    const intervalle = parseInt(interaction.fields.getTextInputValue('intervalle'), 10);
+    if (!Number.isNaN(seuil) && seuil > 0) gc.antiRaid.joinThreshold = seuil;
+    if (!Number.isNaN(intervalle) && intervalle > 0) gc.antiRaid.joinIntervalMs = intervalle * 1000;
+    sauvegarderConfig(config);
+    await interaction.update(sectionAntiraid(gc));
+    return;
+  }
+}
+
 async function gererBouton(interaction) {
   const gc = getGuildConfig(interaction.guild.id);
+
+  // ---- Boutons du panneau /config ----
+  if (interaction.customId === 'cfg_back') {
+    await interaction.update(menuPrincipal());
+    return;
+  }
+  if (interaction.customId === 'cfg_welcome_edit') {
+    await interaction.showModal(modaleTexte('cfg_welcome_modal', 'Texte de bienvenue', gc.welcome.title, gc.welcome.message));
+    return;
+  }
+  if (interaction.customId === 'cfg_goodbye_edit') {
+    await interaction.showModal(modaleTexte('cfg_goodbye_modal', "Texte d'au revoir", gc.goodbye.title, gc.goodbye.message));
+    return;
+  }
+  if (interaction.customId === 'cfg_autorole_clear') {
+    gc.autoRole.roleId = null;
+    sauvegarderConfig(config);
+    await interaction.update(sectionAutorole(gc));
+    return;
+  }
+  if (interaction.customId === 'cfg_antilien_toggle') {
+    gc.antiLink.enabled = !gc.antiLink.enabled;
+    sauvegarderConfig(config);
+    await interaction.update(sectionAntilien(gc));
+    return;
+  }
+  if (interaction.customId === 'cfg_antiraid_toggle') {
+    gc.antiRaid.enabled = !gc.antiRaid.enabled;
+    sauvegarderConfig(config);
+    await interaction.update(sectionAntiraid(gc));
+    return;
+  }
+  if (interaction.customId === 'cfg_antiraid_edit') {
+    await interaction.showModal(modaleAntiraid(gc));
+    return;
+  }
 
   if (interaction.customId === 'ouvrir_ticket') {
     if (!gc.tickets.enabled) {
