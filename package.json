@@ -1,5 +1,5 @@
 {
-  "name": "gestion",
+  "name": "gestion-bot",
   "version": "1.0.0",
   "description": "Bot Discord de gestion de serveur (tickets, bienvenue/au revoir, rôle auto, anti-lien, anti-raid)",
   "main": "index.js",
@@ -13,3 +13,4 @@
   "engines": {
     "node": ">=18.0.0"
   }
+}
