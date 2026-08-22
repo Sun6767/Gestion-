@@ -83,9 +83,11 @@ function getGuildConfig(guildId) {
       antiLink: { enabled: false, logChannelId: null, whitelistRoleIds: [], whitelistChannelIds: [] },
       antiRaid: { enabled: false, joinThreshold: 5, joinIntervalMs: 10000, action: 'kick', logChannelId: null },
       tickets: { enabled: false, categoryId: null, staffRoleId: null, logChannelId: null, panelChannelId: null, counter: 0, openTickets: {} },
+      invites: {},
     };
     sauvegarderConfig(config);
   }
+  if (!config[guildId].invites) config[guildId].invites = {};
   return config[guildId];
 }
 
@@ -106,6 +108,19 @@ const client = new Client({
 
 // Historique des arrivées récentes, pour l'anti-raid (en mémoire)
 const joinsRecents = new Map(); // guildId -> [timestamps]
+
+// Cache des invitations, pour savoir qui a invité qui (en mémoire)
+const cacheInvitations = new Map(); // guildId -> Map(code -> uses)
+
+async function rafraichirCacheInvitations(guild) {
+  try {
+    const invites = await guild.invites.fetch();
+    cacheInvitations.set(guild.id, new Map(invites.map(inv => [inv.code, inv.uses])));
+  } catch (e) {
+    // Le bot n'a probablement pas la permission "Gérer le serveur"
+    cacheInvitations.set(guild.id, new Map());
+  }
+}
 
 // ============================================================
 //  COMMANDES SLASH
@@ -137,6 +152,11 @@ const commands = [
   new SlashCommandBuilder()
     .setName('ticket-fermer')
     .setDescription('Fermer le ticket en cours (à utiliser dans le salon du ticket)'),
+
+  new SlashCommandBuilder()
+    .setName('invitation')
+    .setDescription('Savoir qui a invité un membre sur le serveur')
+    .addUserOption(o => o.setName('membre').setDescription('Le membre à vérifier').setRequired(true)),
 ].map(c => c.toJSON());
 
 async function enregistrerCommandes() {
@@ -158,9 +178,8 @@ function remplacerVariables(texte, membre) {
 
 const REGEX_LIEN = /(https?:\/\/|www\.)[^\s]+/gi;
 
-function construireEmbedAccueil(conf, membre, { estBienvenue }) {
+function construireMessageAccueil(conf, membre, { estBienvenue }) {
   const embed = new EmbedBuilder()
-    .setTitle(remplacerVariables(conf.title, membre))
     .setDescription(remplacerVariables(conf.message, membre))
     .setColor(estBienvenue ? 0x57f287 : 0xed4245)
     .setThumbnail(membre.user.displayAvatarURL({ size: 256 }))
@@ -169,7 +188,12 @@ function construireEmbedAccueil(conf, membre, { estBienvenue }) {
 
   if (conf.bannerUrl) embed.setImage(conf.bannerUrl);
 
-  return embed;
+  // Le titre passe en contenu du message (en gros, via "# ") : c'est le seul
+  // endroit où une mention {user} s'affiche vraiment comme un ping cliquable,
+  // les mentions ne sont pas rendues dans le titre d'un embed.
+  const contenu = `# ${remplacerVariables(conf.title, membre)}`;
+
+  return { content: contenu, embeds: [embed] };
 }
 
 // ============================================================
@@ -216,6 +240,7 @@ function sectionBienvenue(gc) {
   const selectSalon = new ChannelSelectMenuBuilder().setCustomId('cfg_welcome_channel').setPlaceholder('Choisir le salon de bienvenue').addChannelTypes(ChannelType.GuildText);
   const boutons = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('cfg_welcome_edit').setLabel('Modifier le texte').setEmoji('✏️').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('cfg_welcome_test').setLabel('Tester').setEmoji('🧪').setStyle(ButtonStyle.Secondary),
     boutonRetour()
   );
 
@@ -235,6 +260,7 @@ function sectionAurevoir(gc) {
   const selectSalon = new ChannelSelectMenuBuilder().setCustomId('cfg_goodbye_channel').setPlaceholder("Choisir le salon d'au revoir").addChannelTypes(ChannelType.GuildText);
   const boutons = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('cfg_goodbye_edit').setLabel('Modifier le texte').setEmoji('✏️').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('cfg_goodbye_test').setLabel('Tester').setEmoji('🧪').setStyle(ButtonStyle.Secondary),
     boutonRetour()
   );
 
@@ -354,6 +380,22 @@ function modaleAntiraid(gc) {
 client.once(Events.ClientReady, async () => {
   console.log(`Connecté en tant que ${client.user.tag}`);
   await enregistrerCommandes();
+  for (const guild of client.guilds.cache.values()) {
+    await rafraichirCacheInvitations(guild);
+  }
+});
+
+// Le bot rejoint un nouveau serveur -> initialiser son cache d'invitations
+client.on(Events.GuildCreate, (guild) => rafraichirCacheInvitations(guild));
+
+// Une invitation est créée/supprimée -> garder le cache à jour
+client.on(Events.InviteCreate, (invite) => {
+  const c = cacheInvitations.get(invite.guild.id) || new Map();
+  c.set(invite.code, invite.uses);
+  cacheInvitations.set(invite.guild.id, c);
+});
+client.on(Events.InviteDelete, (invite) => {
+  cacheInvitations.get(invite.guild.id)?.delete(invite.code);
 });
 
 // ============================================================
@@ -363,13 +405,32 @@ client.once(Events.ClientReady, async () => {
 client.on(Events.GuildMemberAdd, async (membre) => {
   const gc = getGuildConfig(membre.guild.id);
 
+  // Suivi des invitations : on compare le nombre d'utilisations avant/après l'arrivée
+  try {
+    const nouvellesInvites = await membre.guild.invites.fetch();
+    const anciennesInvites = cacheInvitations.get(membre.guild.id) || new Map();
+    const inviteUtilisee = nouvellesInvites.find(inv => (anciennesInvites.get(inv.code) || 0) < inv.uses);
+    cacheInvitations.set(membre.guild.id, new Map(nouvellesInvites.map(inv => [inv.code, inv.uses])));
+
+    if (inviteUtilisee) {
+      gc.invites[membre.id] = {
+        inviterId: inviteUtilisee.inviter ? inviteUtilisee.inviter.id : null,
+        inviterTag: inviteUtilisee.inviter ? inviteUtilisee.inviter.tag : 'Inconnu',
+        code: inviteUtilisee.code,
+        date: Date.now(),
+      };
+    } else {
+      gc.invites[membre.id] = { inviterId: null, inviterTag: null, code: null, date: Date.now() };
+    }
+    sauvegarderConfig(config);
+  } catch (e) {
+    // Pas de permission "Gérer le serveur" -> on ignore, la commande /invitation le signalera
+  }
+
   // Message de bienvenue
   if (gc.welcome.channelId) {
     const salon = membre.guild.channels.cache.get(gc.welcome.channelId);
-    if (salon) {
-      const embed = construireEmbedAccueil(gc.welcome, membre, { estBienvenue: true });
-      salon.send({ content: `${membre}`, embeds: [embed] }).catch(() => {});
-    }
+    if (salon) salon.send(construireMessageAccueil(gc.welcome, membre, { estBienvenue: true })).catch(() => {});
   }
 
   // Rôle automatique
@@ -409,10 +470,7 @@ client.on(Events.GuildMemberRemove, async (membre) => {
   const gc = getGuildConfig(membre.guild.id);
   if (gc.goodbye.channelId) {
     const salon = membre.guild.channels.cache.get(gc.goodbye.channelId);
-    if (salon) {
-      const embed = construireEmbedAccueil(gc.goodbye, membre, { estBienvenue: false });
-      salon.send({ embeds: [embed] }).catch(() => {});
-    }
+    if (salon) salon.send(construireMessageAccueil(gc.goodbye, membre, { estBienvenue: false })).catch(() => {});
   }
 });
 
@@ -514,6 +572,21 @@ async function gererCommande(interaction) {
     }
     case 'ticket-fermer': {
       await fermerTicket(interaction);
+      break;
+    }
+    case 'invitation': {
+      const cible = interaction.options.getUser('membre');
+      const info = gc.invites[cible.id];
+
+      if (!info) {
+        await interaction.reply({ content: `⚠️ Aucune invitation enregistrée pour ${cible} (probablement présent sur le serveur avant l'installation du bot, ou le bot n'a pas la permission "Gérer le serveur").`, ephemeral: true });
+        return;
+      }
+      if (!info.inviterId) {
+        await interaction.reply({ content: `ℹ️ ${cible} a rejoint via un lien d'invitation dont l'auteur n'a pas pu être identifié (lien vanity, widget, ou invitation expirée).`, ephemeral: true });
+        return;
+      }
+      await interaction.reply({ content: `👥 ${cible} a été invité par <@${info.inviterId}> (\`${info.inviterTag}\`) via le code \`${info.code}\`.`, ephemeral: true });
       break;
     }
   }
@@ -627,6 +700,16 @@ async function gererBouton(interaction) {
   }
   if (interaction.customId === 'cfg_goodbye_edit') {
     await interaction.showModal(modaleTexte('cfg_goodbye_modal', "Texte d'au revoir", gc.goodbye.title, gc.goodbye.message));
+    return;
+  }
+  if (interaction.customId === 'cfg_welcome_test') {
+    const apercu = construireMessageAccueil(gc.welcome, interaction.member, { estBienvenue: true });
+    await interaction.reply({ content: `**Aperçu (visible uniquement par toi) :**\n${apercu.content}`, embeds: apercu.embeds, ephemeral: true });
+    return;
+  }
+  if (interaction.customId === 'cfg_goodbye_test') {
+    const apercu = construireMessageAccueil(gc.goodbye, interaction.member, { estBienvenue: false });
+    await interaction.reply({ content: `**Aperçu (visible uniquement par toi) :**\n${apercu.content}`, embeds: apercu.embeds, ephemeral: true });
     return;
   }
   if (interaction.customId === 'cfg_autorole_clear') {
