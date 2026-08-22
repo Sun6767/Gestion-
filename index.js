@@ -435,6 +435,13 @@ function modaleAntiraid(gc) {
   return modal;
 }
 
+function modaleAjoutWarn() {
+  const modal = new ModalBuilder().setCustomId('warnpanel_add_modal').setTitle("Ajouter un avertissement");
+  const champRaison = new TextInputBuilder().setCustomId('raison').setLabel('Raison (obligatoire)').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(300);
+  modal.addComponents(new ActionRowBuilder().addComponents(champRaison));
+  return modal;
+}
+
 // ============================================================
 //  ÉVÉNEMENT : PRÊT
 // ============================================================
@@ -813,6 +820,11 @@ async function gererModale(interaction) {
     await interaction.update(sectionAntiraid(gc));
     return;
   }
+  if (interaction.customId === 'warnpanel_add_modal') {
+    const raison = interaction.fields.getTextInputValue('raison');
+    await traiterAjoutWarn(interaction, gc, raison);
+    return;
+  }
 }
 
 async function gererBouton(interaction) {
@@ -830,7 +842,16 @@ async function gererBouton(interaction) {
     return;
   }
   if (interaction.customId === 'warnpanel_add') {
-    await gererAjoutWarn(interaction, gc);
+    const cibleId = cibleActuelleWarn(interaction);
+    if (!cibleId) {
+      await interaction.reply({ content: '⚠️ Sélectionne un membre.', ephemeral: true });
+      return;
+    }
+    if (cibleId === interaction.user.id) {
+      await interaction.reply({ content: "⚠️ Tu ne peux pas t'avertir toi-même.", ephemeral: true });
+      return;
+    }
+    await interaction.showModal(modaleAjoutWarn());
     return;
   }
   if (interaction.customId === 'warnpanel_remove') {
@@ -1092,10 +1113,10 @@ async function appliquerRolesAvertissement(membreCible, gc) {
   }
 }
 
-function ajouterHistoriqueWarn(gc, cibleId, action, moderateurTag) {
+function ajouterHistoriqueWarn(gc, cibleId, action, moderateurTag, raison) {
   if (!gc.warns[cibleId]) gc.warns[cibleId] = { count: 0, history: [] };
   if (!gc.warns[cibleId].history) gc.warns[cibleId].history = [];
-  gc.warns[cibleId].history.unshift({ action, moderateur: moderateurTag, date: Date.now() });
+  gc.warns[cibleId].history.unshift({ action, moderateur: moderateurTag, date: Date.now(), raison: raison || null });
   gc.warns[cibleId].history = gc.warns[cibleId].history.slice(0, 10);
 }
 
@@ -1113,14 +1134,10 @@ function envoyerLogWarn(guild, gc, texte) {
   if (salon) salon.send(texte).catch(() => {});
 }
 
-async function gererAjoutWarn(interaction, gc) {
+async function traiterAjoutWarn(interaction, gc, raison) {
   const cibleId = cibleActuelleWarn(interaction);
   if (!cibleId) {
     await interaction.reply({ content: '⚠️ Sélectionne un membre.', ephemeral: true });
-    return;
-  }
-  if (cibleId === interaction.user.id) {
-    await interaction.reply({ content: "⚠️ Tu ne peux pas t'avertir toi-même.", ephemeral: true });
     return;
   }
   const membreCible = await interaction.guild.members.fetch(cibleId).catch(() => null);
@@ -1132,11 +1149,11 @@ async function gererAjoutWarn(interaction, gc) {
   if (!gc.warns[cibleId]) gc.warns[cibleId] = { count: 0, history: [] };
   gc.warns[cibleId].count += 1;
   const nombre = gc.warns[cibleId].count;
-  ajouterHistoriqueWarn(gc, cibleId, '+1 avertissement', interaction.user.tag);
+  ajouterHistoriqueWarn(gc, cibleId, '+1 avertissement', interaction.user.tag, raison);
   sauvegarderConfig(config);
 
-  membreCible.send(`⚠️ Tu as reçu un avertissement sur **${interaction.guild.name}** (${nombre}/${SEUIL_WARN_KICK}).`).catch(() => {});
-  envoyerLogWarn(interaction.guild, gc, `⚠️ ${membreCible} a pris son ${ordinalFr(nombre)} avertissement. (${nombre}/${SEUIL_WARN_KICK})`);
+  membreCible.send(`⚠️ Tu as reçu un avertissement sur **${interaction.guild.name}** (${nombre}/${SEUIL_WARN_KICK}).\n**Raison :** ${raison}`).catch(() => {});
+  envoyerLogWarn(interaction.guild, gc, `⚠️ ${membreCible} a pris son ${ordinalFr(nombre)} avertissement. (${nombre}/${SEUIL_WARN_KICK})\n**Raison :** ${raison}`);
 
   if (nombre >= SEUIL_WARN_KICK) {
     gc.warns[cibleId].count = 0;
@@ -1214,7 +1231,7 @@ async function gererLogsWarn(interaction, gc) {
     await interaction.reply({ content: `ℹ️ Aucun historique pour <@${cibleId}>.`, ephemeral: true });
     return;
   }
-  const texte = historique.map(h => `<t:${Math.floor(h.date / 1000)}:R> — ${h.action} (par ${h.moderateur})`).join('\n');
+  const texte = historique.map(h => `<t:${Math.floor(h.date / 1000)}:R> — ${h.action}${h.raison ? ` (raison : ${h.raison})` : ''} (par ${h.moderateur})`).join('\n');
   await interaction.reply({ content: `📜 **Historique de <@${cibleId}> :**\n${texte}`, ephemeral: true });
 }
 
