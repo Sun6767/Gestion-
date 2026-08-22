@@ -86,11 +86,13 @@ function getGuildConfig(guildId) {
       tickets: { enabled: false, categoryId: null, staffRoleId: null, logChannelId: null, panelChannelId: null, counter: 0, openTickets: {} },
       invites: {},
       warns: {},
+      tempBans: {},
     };
     sauvegarderConfig(config);
   }
   if (!config[guildId].invites) config[guildId].invites = {};
   if (!config[guildId].warns) config[guildId].warns = {};
+  if (!config[guildId].tempBans) config[guildId].tempBans = {};
   return config[guildId];
 }
 
@@ -165,6 +167,33 @@ const commands = [
     .setName('warn')
     .setDescription('Avertir un membre (kick automatique au 3e avertissement)')
     .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers),
+
+  new SlashCommandBuilder()
+    .setName('avertissements')
+    .setDescription("Voir le nombre d'avertissements d'un membre")
+    .addUserOption(o => o.setName('membre').setDescription('Le membre à vérifier').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers),
+
+  new SlashCommandBuilder()
+    .setName('warn-reset')
+    .setDescription("Remettre à 0 les avertissements d'un membre")
+    .addUserOption(o => o.setName('membre').setDescription('Le membre concerné').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers),
+
+  new SlashCommandBuilder()
+    .setName('kick')
+    .setDescription('Exclure un membre du serveur')
+    .addUserOption(o => o.setName('membre').setDescription('Le membre à exclure').setRequired(true))
+    .addStringOption(o => o.setName('justification').setDescription("Raison de l'exclusion").setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers),
+
+  new SlashCommandBuilder()
+    .setName('ban')
+    .setDescription('Bannir un membre du serveur')
+    .addUserOption(o => o.setName('membre').setDescription('Le membre à bannir').setRequired(true))
+    .addStringOption(o => o.setName('justification').setDescription('Raison du bannissement').setRequired(true))
+    .addIntegerOption(o => o.setName('duree-minutes').setDescription('Durée en minutes (laisser vide = bannissement définitif)').setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers),
 ].map(c => c.toJSON());
 
 async function enregistrerCommandes() {
@@ -391,6 +420,23 @@ client.once(Events.ClientReady, async () => {
   for (const guild of client.guilds.cache.values()) {
     await rafraichirCacheInvitations(guild);
   }
+
+  // Reprogrammer les bans temporaires en attente (au cas où le bot a redémarré entre-temps)
+  for (const [guildId, gc] of Object.entries(config)) {
+    if (!gc.tempBans) continue;
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) continue;
+    for (const [userId, info] of Object.entries(gc.tempBans)) {
+      const delaiRestant = info.unbanAt - Date.now();
+      if (delaiRestant <= 0) {
+        await guild.members.unban(userId, 'Fin du bannissement temporaire').catch(() => {});
+        delete gc.tempBans[userId];
+        sauvegarderConfig(config);
+      } else {
+        programmerDeban(guild, userId, delaiRestant);
+      }
+    }
+  }
 });
 
 // Le bot rejoint un nouveau serveur -> initialiser son cache d'invitations
@@ -600,6 +646,27 @@ async function gererCommande(interaction) {
     case 'warn': {
       const select = new UserSelectMenuBuilder().setCustomId('warn_select_user').setPlaceholder('Choisir le membre à avertir');
       await interaction.reply({ content: '⚠️ Sélectionne le membre à avertir :', components: [new ActionRowBuilder().addComponents(select)], ephemeral: true });
+      break;
+    }
+    case 'avertissements': {
+      const cible = interaction.options.getUser('membre');
+      const nombre = gc.warns[cible.id]?.count || 0;
+      await interaction.reply({ content: `📋 ${cible} a ${nombre}/${SEUIL_WARN_KICK} avertissement(s).`, ephemeral: true });
+      break;
+    }
+    case 'warn-reset': {
+      const cible = interaction.options.getUser('membre');
+      gc.warns[cible.id] = { count: 0 };
+      sauvegarderConfig(config);
+      await interaction.reply({ content: `✅ Avertissements de ${cible} remis à 0.`, ephemeral: true });
+      break;
+    }
+    case 'kick': {
+      await executerKick(interaction, gc);
+      break;
+    }
+    case 'ban': {
+      await executerBan(interaction, gc);
       break;
     }
   }
@@ -829,6 +896,76 @@ async function fermerTicket(interaction) {
 }
 
 const SEUIL_WARN_KICK = 3;
+
+// Minuteurs de déban en cours, pour pouvoir les annuler si besoin (en mémoire)
+const minuteursDeban = new Map(); // `${guildId}:${userId}` -> Timeout
+
+async function executerKick(interaction, gc) {
+  const cible = interaction.options.getUser('membre');
+  const justification = interaction.options.getString('justification');
+
+  const membreCible = await interaction.guild.members.fetch(cible.id).catch(() => null);
+  if (!membreCible) {
+    await interaction.reply({ content: "⚠️ Ce membre n'est plus sur le serveur.", ephemeral: true });
+    return;
+  }
+  if (!membreCible.kickable) {
+    await interaction.reply({ content: "⚠️ Je n'ai pas la permission d'exclure ce membre (rôle trop élevé).", ephemeral: true });
+    return;
+  }
+
+  await membreCible.send(`👢 Tu as été exclu de **${interaction.guild.name}**.\n**Raison :** ${justification}`).catch(() => {});
+  await membreCible.kick(`${justification} — par ${interaction.user.tag}`);
+
+  await interaction.reply({ content: `✅ ${cible} a été exclu du serveur.\n**Raison :** ${justification}` });
+}
+
+async function executerBan(interaction, gc) {
+  const cible = interaction.options.getUser('membre');
+  const justification = interaction.options.getString('justification');
+  const dureeMinutes = interaction.options.getInteger('duree-minutes');
+
+  const membreCible = await interaction.guild.members.fetch(cible.id).catch(() => null);
+  if (membreCible && !membreCible.bannable) {
+    await interaction.reply({ content: "⚠️ Je n'ai pas la permission de bannir ce membre (rôle trop élevé).", ephemeral: true });
+    return;
+  }
+
+  if (membreCible) {
+    await membreCible.send(
+      `🔨 Tu as été banni de **${interaction.guild.name}**.\n**Raison :** ${justification}` +
+      (dureeMinutes ? `\n**Durée :** ${dureeMinutes} minute(s)` : '\n**Durée :** définitif')
+    ).catch(() => {});
+  }
+
+  await interaction.guild.members.ban(cible.id, { reason: `${justification} — par ${interaction.user.tag}` });
+
+  if (dureeMinutes && dureeMinutes > 0) {
+    const delaiMs = dureeMinutes * 60000;
+    gc.tempBans[cible.id] = { unbanAt: Date.now() + delaiMs, reason: justification };
+    sauvegarderConfig(config);
+    programmerDeban(interaction.guild, cible.id, delaiMs);
+
+    await interaction.reply({ content: `✅ ${cible} a été banni pour **${dureeMinutes} minute(s)**.\n**Raison :** ${justification}` });
+  } else {
+    await interaction.reply({ content: `✅ ${cible} a été banni **définitivement**.\n**Raison :** ${justification}` });
+  }
+}
+
+function programmerDeban(guild, userId, delaiMs) {
+  const cle = `${guild.id}:${userId}`;
+  if (minuteursDeban.has(cle)) clearTimeout(minuteursDeban.get(cle));
+
+  const timeout = setTimeout(async () => {
+    await guild.members.unban(userId, 'Fin du bannissement temporaire').catch(() => {});
+    const gc = getGuildConfig(guild.id);
+    delete gc.tempBans[userId];
+    sauvegarderConfig(config);
+    minuteursDeban.delete(cle);
+  }, delaiMs);
+
+  minuteursDeban.set(cle, timeout);
+}
 
 async function avertirMembre(interaction, gc, cibleId) {
   if (cibleId === interaction.user.id) {
