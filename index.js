@@ -29,6 +29,7 @@ const {
   ButtonBuilder,
   ButtonStyle,
   RoleSelectMenuBuilder,
+  UserSelectMenuBuilder,
   ChannelSelectMenuBuilder,
   StringSelectMenuBuilder,
   ModalBuilder,
@@ -84,10 +85,12 @@ function getGuildConfig(guildId) {
       antiRaid: { enabled: false, joinThreshold: 5, joinIntervalMs: 10000, action: 'kick', logChannelId: null },
       tickets: { enabled: false, categoryId: null, staffRoleId: null, logChannelId: null, panelChannelId: null, counter: 0, openTickets: {} },
       invites: {},
+      warns: {},
     };
     sauvegarderConfig(config);
   }
   if (!config[guildId].invites) config[guildId].invites = {};
+  if (!config[guildId].warns) config[guildId].warns = {};
   return config[guildId];
 }
 
@@ -157,6 +160,11 @@ const commands = [
     .setName('invitation')
     .setDescription('Savoir qui a invité un membre sur le serveur')
     .addUserOption(o => o.setName('membre').setDescription('Le membre à vérifier').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('warn')
+    .setDescription('Avertir un membre (kick automatique au 3e avertissement)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers),
 ].map(c => c.toJSON());
 
 async function enregistrerCommandes() {
@@ -515,7 +523,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await gererBouton(interaction);
     } else if (interaction.isStringSelectMenu()) {
       await gererSelectMenu(interaction);
-    } else if (interaction.isChannelSelectMenu() || interaction.isRoleSelectMenu()) {
+    } else if (interaction.isChannelSelectMenu() || interaction.isRoleSelectMenu() || interaction.isUserSelectMenu()) {
       await gererSelectMenu(interaction);
     } else if (interaction.isModalSubmit()) {
       await gererModale(interaction);
@@ -589,6 +597,11 @@ async function gererCommande(interaction) {
       await interaction.reply({ content: `👥 ${cible} a été invité par <@${info.inviterId}> (\`${info.inviterTag}\`) via le code \`${info.code}\`.`, ephemeral: true });
       break;
     }
+    case 'warn': {
+      const select = new UserSelectMenuBuilder().setCustomId('warn_select_user').setPlaceholder('Choisir le membre à avertir');
+      await interaction.reply({ content: '⚠️ Sélectionne le membre à avertir :', components: [new ActionRowBuilder().addComponents(select)], ephemeral: true });
+      break;
+    }
   }
 }
 
@@ -597,6 +610,11 @@ async function gererCommande(interaction) {
 async function gererSelectMenu(interaction) {
   const gc = getGuildConfig(interaction.guild.id);
   const id = interaction.customId;
+
+  if (id === 'warn_select_user') {
+    await avertirMembre(interaction, gc, interaction.values[0]);
+    return;
+  }
 
   if (id === 'cfg_menu') {
     await interaction.update(construireSection(interaction.values[0], gc));
@@ -808,6 +826,45 @@ async function fermerTicket(interaction) {
   sauvegarderConfig(config);
 
   setTimeout(() => salon.delete().catch(() => {}), 5000);
+}
+
+const SEUIL_WARN_KICK = 3;
+
+async function avertirMembre(interaction, gc, cibleId) {
+  if (cibleId === interaction.user.id) {
+    await interaction.update({ content: "⚠️ Tu ne peux pas t'avertir toi-même.", components: [] });
+    return;
+  }
+
+  const membreCible = await interaction.guild.members.fetch(cibleId).catch(() => null);
+  if (!membreCible) {
+    await interaction.update({ content: "⚠️ Ce membre n'est plus sur le serveur.", components: [] });
+    return;
+  }
+
+  if (!gc.warns[cibleId]) gc.warns[cibleId] = { count: 0 };
+  gc.warns[cibleId].count += 1;
+  const nombre = gc.warns[cibleId].count;
+  sauvegarderConfig(config);
+
+  // On informe le membre par MP, sans bloquer si ses MP sont fermés
+  membreCible.send(`⚠️ Tu as reçu un avertissement sur **${interaction.guild.name}** (${nombre}/${SEUIL_WARN_KICK}).`).catch(() => {});
+
+  if (nombre >= SEUIL_WARN_KICK) {
+    gc.warns[cibleId].count = 0;
+    sauvegarderConfig(config);
+
+    if (membreCible.kickable) {
+      await membreCible.kick(`Exclusion automatique : ${SEUIL_WARN_KICK} avertissements atteints`).catch(() => {});
+      membreCible.send(`🚨 Tu as atteint ${SEUIL_WARN_KICK} avertissements sur **${interaction.guild.name}** et as été exclu du serveur.`).catch(() => {});
+      await interaction.update({ content: `🚨 ${membreCible} a atteint ${SEUIL_WARN_KICK} avertissements et a été **exclu automatiquement** du serveur. Le compteur repart à 0.`, components: [] });
+    } else {
+      await interaction.update({ content: `⚠️ ${membreCible} a atteint ${SEUIL_WARN_KICK} avertissements, mais je n'ai pas la permission de l'exclure (rôle trop élevé). Le compteur repart à 0.`, components: [] });
+    }
+    return;
+  }
+
+  await interaction.update({ content: `✅ ${membreCible} a reçu un avertissement (${nombre}/${SEUIL_WARN_KICK}).`, components: [] });
 }
 
 // ============================================================
