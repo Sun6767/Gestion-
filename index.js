@@ -35,6 +35,7 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  AttachmentBuilder,
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -83,7 +84,7 @@ function getGuildConfig(guildId) {
       autoRole: { roleId: null },
       antiLink: { enabled: false, logChannelId: null, whitelistRoleIds: [], whitelistChannelIds: [] },
       antiRaid: { enabled: false, joinThreshold: 5, joinIntervalMs: 10000, action: 'kick', logChannelId: null },
-      tickets: { enabled: false, categoryId: null, staffRoleId: null, logChannelId: null, panelChannelId: null, counter: 0, openTickets: {} },
+      tickets: { enabled: false, categoryId: null, staffRoleId: null, logChannelId: null, panelChannelId: null, counter: 0, openTickets: {} }, // openTickets[userId] = { channelId, sujet, description, ouvertLe, reclamePar }
       invites: {},
       warns: {},
       warnRoles: { '1': null, '2': null, '3': null },
@@ -825,6 +826,10 @@ async function gererModale(interaction) {
     await traiterAjoutWarn(interaction, gc, raison);
     return;
   }
+  if (interaction.customId === 'ticket_ouverture_modal') {
+    await creerTicket(interaction, gc);
+    return;
+  }
 }
 
 async function gererBouton(interaction) {
@@ -924,66 +929,154 @@ async function gererBouton(interaction) {
     }
 
     // Empêcher un membre d'ouvrir plusieurs tickets
-    const ticketExistantId = gc.tickets.openTickets[interaction.user.id];
-    if (ticketExistantId && interaction.guild.channels.cache.has(ticketExistantId)) {
-      await interaction.reply({ content: `⚠️ Tu as déjà un ticket ouvert : <#${ticketExistantId}>.`, ephemeral: true });
+    const ticketExistant = gc.tickets.openTickets[interaction.user.id];
+    if (ticketExistant && interaction.guild.channels.cache.has(ticketExistant.channelId)) {
+      await interaction.reply({ content: `⚠️ Tu as déjà un ticket ouvert : <#${ticketExistant.channelId}>.`, ephemeral: true });
       return;
     }
 
-    gc.tickets.counter += 1;
-    const nomSalon = `ticket-${gc.tickets.counter}`;
-
-    const salonTicket = await interaction.guild.channels.create({
-      name: nomSalon,
-      type: ChannelType.GuildText,
-      parent: gc.tickets.categoryId,
-      permissionOverwrites: [
-        { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-        { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-        { id: gc.tickets.staffRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-      ],
-    });
-
-    gc.tickets.openTickets[interaction.user.id] = salonTicket.id;
-    sauvegarderConfig(config);
-
-    const embed = new EmbedBuilder()
-      .setTitle(`Ticket #${gc.tickets.counter}`)
-      .setDescription(`Bonjour ${interaction.user}, le staff (<@&${gc.tickets.staffRoleId}>) va te répondre. Utilise le bouton ci-dessous ou \`/ticket-fermer\` pour clore ce ticket.`)
-      .setColor(0x2b6cb0);
-    const boutonFermer = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('fermer_ticket').setLabel('Fermer le ticket').setEmoji('🔒').setStyle(ButtonStyle.Danger)
-    );
-
-    await salonTicket.send({ content: `${interaction.user} <@&${gc.tickets.staffRoleId}>`, embeds: [embed], components: [boutonFermer] });
-    await interaction.reply({ content: `✅ Ticket créé : ${salonTicket}`, ephemeral: true });
-
-    if (gc.tickets.logChannelId) {
-      const logSalon = interaction.guild.channels.cache.get(gc.tickets.logChannelId);
-      if (logSalon) logSalon.send(`🎫 Ticket ouvert par ${interaction.user.tag} : ${salonTicket}`).catch(() => {});
-    }
+    const modal = new ModalBuilder().setCustomId('ticket_ouverture_modal').setTitle('Ouvrir un ticket');
+    const champSujet = new TextInputBuilder().setCustomId('sujet').setLabel('Sujet').setStyle(TextInputStyle.Short).setPlaceholder('Ex : Problème de paiement, signalement...').setRequired(true).setMaxLength(100);
+    const champDescription = new TextInputBuilder().setCustomId('description').setLabel('Explique ta demande en détail').setStyle(TextInputStyle.Paragraph).setPlaceholder('Décris ta situation, ce qui s\'est passé, ce dont tu as besoin...').setRequired(true).setMaxLength(1000);
+    modal.addComponents(new ActionRowBuilder().addComponents(champSujet), new ActionRowBuilder().addComponents(champDescription));
+    await interaction.showModal(modal);
+    return;
   }
 
   if (interaction.customId === 'fermer_ticket') {
     await fermerTicket(interaction);
+    return;
   }
+
+  if (interaction.customId === 'ticket_reclamer') {
+    const gcTickets = gc.tickets;
+    const infosTicket = Object.values(gcTickets.openTickets).find(t => t.channelId === interaction.channel.id);
+    if (!infosTicket) {
+      await interaction.reply({ content: "⚠️ Ce salon n'est pas un ticket ouvert.", ephemeral: true });
+      return;
+    }
+    if (infosTicket.reclamePar) {
+      await interaction.reply({ content: `⚠️ Ce ticket est déjà pris en charge par <@${infosTicket.reclamePar}>.`, ephemeral: true });
+      return;
+    }
+    infosTicket.reclamePar = interaction.user.id;
+    sauvegarderConfig(config);
+    await interaction.reply({ content: `🙋 ${interaction.user} a pris en charge ce ticket.` });
+  }
+}
+
+async function creerTicket(interaction, gc) {
+  const sujet = interaction.fields.getTextInputValue('sujet');
+  const description = interaction.fields.getTextInputValue('description');
+
+  gc.tickets.counter += 1;
+  const numero = gc.tickets.counter;
+  const nomSalon = `ticket-${numero}`;
+
+  const salonTicket = await interaction.guild.channels.create({
+    name: nomSalon,
+    type: ChannelType.GuildText,
+    parent: gc.tickets.categoryId,
+    topic: `Ticket #${numero} • ${sujet} • ouvert par ${interaction.user.tag}`,
+    permissionOverwrites: [
+      { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+      { id: gc.tickets.staffRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+    ],
+  });
+
+  gc.tickets.openTickets[interaction.user.id] = {
+    channelId: salonTicket.id,
+    sujet,
+    description,
+    ouvertLe: Date.now(),
+    reclamePar: null,
+  };
+  sauvegarderConfig(config);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🎫 Ticket #${numero} — ${sujet}`)
+    .setDescription(description)
+    .addFields(
+      { name: 'Ouvert par', value: `${interaction.user}`, inline: true },
+      { name: 'Staff assigné', value: `<@&${gc.tickets.staffRoleId}>`, inline: true }
+    )
+    .setColor(0x2b6cb0)
+    .setThumbnail(interaction.user.displayAvatarURL({ size: 256 }))
+    .setFooter({ text: `Ticket #${numero}` })
+    .setTimestamp();
+
+  const boutons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ticket_reclamer').setLabel('Prendre en charge').setEmoji('🙋').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('fermer_ticket').setLabel('Fermer le ticket').setEmoji('🔒').setStyle(ButtonStyle.Danger)
+  );
+
+  await salonTicket.send({
+    content: `${interaction.user} <@&${gc.tickets.staffRoleId}>\nMerci d'avoir ouvert un ticket ! Explique ta demande ici si besoin de précisions, un membre du staff va s'en occuper.`,
+    embeds: [embed],
+    components: [boutons],
+  });
+  await interaction.reply({ content: `✅ Ticket créé : ${salonTicket}`, ephemeral: true });
+
+  if (gc.tickets.logChannelId) {
+    const logSalon = interaction.guild.channels.cache.get(gc.tickets.logChannelId);
+    if (logSalon) {
+      const embedLog = new EmbedBuilder()
+        .setTitle(`🎫 Ticket #${numero} ouvert`)
+        .addFields(
+          { name: 'Membre', value: `${interaction.user} (\`${interaction.user.tag}\`)`, inline: true },
+          { name: 'Salon', value: `${salonTicket}`, inline: true },
+          { name: 'Sujet', value: sujet }
+        )
+        .setColor(0x57f287)
+        .setTimestamp();
+      logSalon.send({ embeds: [embedLog] }).catch(() => {});
+    }
+  }
+}
+
+async function construireTranscript(salon) {
+  const messages = await salon.messages.fetch({ limit: 100 }).catch(() => null);
+  if (!messages) return "Impossible de récupérer les messages.";
+  const lignes = [...messages.values()]
+    .reverse()
+    .map(m => `[${new Date(m.createdTimestamp).toLocaleString('fr-FR')}] ${m.author.tag} : ${m.content || '(pièce jointe / embed)'}`);
+  return lignes.join('\n') || 'Aucun message dans ce ticket.';
 }
 
 async function fermerTicket(interaction) {
   const gc = getGuildConfig(interaction.guild.id);
   const salon = interaction.channel;
 
-  const proprietaireId = Object.keys(gc.tickets.openTickets).find(uid => gc.tickets.openTickets[uid] === salon.id);
+  const proprietaireId = Object.keys(gc.tickets.openTickets).find(uid => gc.tickets.openTickets[uid].channelId === salon.id);
   if (!proprietaireId) {
     await interaction.reply({ content: "⚠️ Ce salon n'est pas un ticket ouvert.", ephemeral: true });
     return;
   }
+  const infosTicket = gc.tickets.openTickets[proprietaireId];
 
-  await interaction.reply({ content: '🔒 Fermeture du ticket dans 5 secondes...' });
+  await interaction.reply({ content: '🔒 Fermeture du ticket dans 5 secondes... (un résumé est envoyé dans les logs)' });
+
+  const transcriptTexte = await construireTranscript(salon);
+  const dureeMin = Math.round((Date.now() - infosTicket.ouvertLe) / 60000);
 
   if (gc.tickets.logChannelId) {
     const logSalon = interaction.guild.channels.cache.get(gc.tickets.logChannelId);
-    if (logSalon) logSalon.send(`🔒 Ticket fermé par ${interaction.user.tag} : ${salon.name}`).catch(() => {});
+    if (logSalon) {
+      const fichier = new AttachmentBuilder(Buffer.from(transcriptTexte, 'utf-8'), { name: `${salon.name}-transcript.txt` });
+      const embedLog = new EmbedBuilder()
+        .setTitle(`🔒 Ticket fermé — ${salon.name}`)
+        .addFields(
+          { name: 'Sujet', value: infosTicket.sujet || 'Non renseigné' },
+          { name: 'Ouvert par', value: `<@${proprietaireId}>`, inline: true },
+          { name: 'Fermé par', value: `${interaction.user}`, inline: true },
+          { name: 'Pris en charge par', value: infosTicket.reclamePar ? `<@${infosTicket.reclamePar}>` : 'Personne', inline: true },
+          { name: 'Durée', value: `${dureeMin} min`, inline: true }
+        )
+        .setColor(0xed4245)
+        .setTimestamp();
+      logSalon.send({ embeds: [embedLog], files: [fichier] }).catch(() => {});
+    }
   }
 
   delete gc.tickets.openTickets[proprietaireId];
